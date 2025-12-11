@@ -104,7 +104,14 @@ hf_dl "Kijai/WanVideo_comfy" "Wan2_1_VAE_bf16.safetensors" "$COMFY_MODELS_DIR/va
 # # 5) LoRA
 # hf_dl "Kijai/WanVideo_comfy" "Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors" "$COMFY_MODELS_DIR/loras" || true
 
-# mkdir -p /workspace/ComfyUI/models/transformers/TencentGameMate/chinese-wav2vec2-base && cd $_ && wget -q https://huggingface.co/TencentGameMate/chinese-wav2vec2-base/resolve/main/pytorch_model.bin && wget -q https://huggingface.co/TencentGameMate/chinese-wav2vec2-base/resolve/main/config.json && wget -q https://huggingface.co/TencentGameMate/chinese-wav2vec2-base/resolve/main/preprocessor_config.json
+# # ------------------------
+# # 6) Transformers - Chinese wav2vec2 base
+# # ------------------------
+# W2V_DIR="$COMFY_MODELS_DIR/transformers/TencentGameMate/chinese-wav2vec2-base"
+
+# hf_dl "TencentGameMate/chinese-wav2vec2-base" "pytorch_model.bin" "$W2V_DIR" || true
+# hf_dl "TencentGameMate/chinese-wav2vec2-base" "config.json" "$W2V_DIR" || true
+# hf_dl "TencentGameMate/chinese-wav2vec2-base" "preprocessor_config.json" "$W2V_DIR" || true
 
 
 echo "✅ Model download section finished (some downloads may have failed — check the log above)."
@@ -153,7 +160,7 @@ req_files=(
 for repo_req in "${req_files[@]}"; do
   if [ -f "$repo_req" ]; then
     echo "[INFO] Installing requirements from $repo_req"
-    $PIP install --no-input -r "$repo_req" || echo "[WARN] pip install failed for $repo_req"
+    pip install --no-input -r "$repo_req" || echo "[WARN] pip install failed for $repo_req"
   else
     echo "[INFO] No requirements file at $repo_req — skipping."
   fi
