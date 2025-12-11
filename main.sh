@@ -1,7 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-pwd
-ls
 cd /
-ls
+apt-get moo
+sudo apt-get moo
 python3 -m http.server 3000
