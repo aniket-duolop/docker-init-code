@@ -1,17 +1,8 @@
 #!/bin/bash
 set -euo pipefail
-cd /
 
-# # ------------------------
-# # System packages (aria2) - non-blocking if not available
-# # ------------------------
-# if command -v apt-get >/dev/null 2>&1; then
-#   echo "[INFO] Updating apt and installing aria2 (may prompt for sudo password)..."
-#   sudo apt-get update -y
-#   sudo apt-get install -y aria2 || true
-# else
-#   echo "[WARN] apt-get not found; skipping apt install of aria2."
-# fi
+START_TIME=$(date +%s)
+cd /
 
 WORKDIR="/workspace"
 COMFY_REPO="https://github.com/comfyanonymous/ComfyUI.git"
@@ -42,15 +33,6 @@ mkdir -p "$COMFY_MODELS_DIR/clip_vision"
 mkdir -p "$COMFY_MODELS_DIR/text_encoders"
 mkdir -p "$COMFY_MODELS_DIR/loras"
 
-# ------------------------
-# Install python packages (requirements without torch family)
-# ------------------------
-# echo "[INFO] Preparing pip and wheel..."
-# pip install --upgrade pip setuptools wheel
-
-# pip install fastapi uvicorn python-multipart requests
-
-# pip install packaging ninja
 
 echo "[INFO] Installing ComfyUI python deps (excluding torch-family)..."
 if [ -f requirements.txt ]; then
@@ -67,7 +49,7 @@ fi
 # ------------------------
 echo "[INFO] Installing huggingface_hub (CLI) pinned version..."
 # $PIP install "huggingface_hub==0.36.0"
-pip install -U huggingface_hub[hf_transfer]
+pip install "huggingface_hub==0.36.0"
 
 # If token provided via env, log in non-interactively
 if [ -n "$HF_TOKEN" ]; then
@@ -92,7 +74,7 @@ hf_dl() {
   echo "Downloading $file from $repo → $dest"
   mkdir -p "$dest"
   # Use huggingface-cli download. This assumes huggingface-cli is available and logged in (or model is public).
-  hf download "$repo" "$file" --local-dir "$dest" --local-dir-use-symlinks False || {
+  huggingface-cli download "$repo" "$file" --local-dir "$dest" --local-dir-use-symlinks False || {
     echo "[ERROR] huggingface-cli failed to download $file from $repo. Check token/permissions and that the path is correct."
     return 1
   }
@@ -127,6 +109,72 @@ hf_dl "Kijai/WanVideo_comfy" "Wan2_1_VAE_bf16.safetensors" "$COMFY_MODELS_DIR/va
 
 echo "✅ Model download section finished (some downloads may have failed — check the log above)."
 
+# ------------------------
+# Custom nodes: clone and install
+# ------------------------
+echo "[INFO] Ensuring custom_nodes and node repos exist..."
+CUSTOM_DIR="$COMFY_DIR/custom_nodes"
+mkdir -p "$CUSTOM_DIR"
+cd "$CUSTOM_DIR"
+
+# Clone if not present
+clone_if_missing() {
+  local url="$1"
+  local folder
+  folder="$(basename "$url" .git)"
+  if [ ! -d "$folder" ]; then
+    echo "[INFO] Cloning $url"
+    git clone "$url" || echo "[WARN] git clone failed for $url"
+  else
+    echo "[INFO] $folder already cloned"
+  fi
+}
+
+clone_if_missing "https://github.com/kijai/ComfyUI-WanVideoWrapper.git"
+clone_if_missing "https://github.com/kijai/comfyui-kjnodes.git"
+clone_if_missing "https://github.com/kijai/ComfyUI-MelBandRoFormer.git"
+clone_if_missing "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git"
+
+# ✅ Only new addition #1
+clone_if_missing "https://github.com/ltdrdata/ComfyUI-Manager.git"
+
+# install their requirements (if found)
+cd "$COMFY_DIR"
+
+# Use an array to avoid line-continuation syntax issues
+req_files=(
+  "custom_nodes/ComfyUI-WanVideoWrapper/requirements.txt"
+  "custom_nodes/comfyui-kjnodes/requirements.txt"
+  "custom_nodes/ComfyUI-VideoHelperSuite/requirements.txt"
+  "custom_nodes/ComfyUI-MelBandRoFormer/requirements.txt"
+  "custom_nodes/ComfyUI-Manager/requirements.txt"
+)
+
+for repo_req in "${req_files[@]}"; do
+  if [ -f "$repo_req" ]; then
+    echo "[INFO] Installing requirements from $repo_req"
+    $PIP install --no-input -r "$repo_req" || echo "[WARN] pip install failed for $repo_req"
+  else
+    echo "[INFO] No requirements file at $repo_req — skipping."
+  fi
+done
+
+# ------------------------
+# Final info + start ComfyUI
+# ------------------------
+echo "=== Setup complete. Starting ComfyUI ==="
+echo "[INFO] Listening on $LISTEN_ADDR:$PORT"
 
 
-python3 -m http.server 3000
+# Start ComfyUI
+$PY main.py --listen "$LISTEN_ADDR" --port "$PORT" --use-sage-attention &
+
+wait
+
+END_TIME=$(date +%s)
+ELAPSED=$(( END_TIME - START_TIME ))
+
+echo ""
+echo "======================================"
+echo "🚀 Total setup time: ${ELAPSED} seconds"
+echo "======================================"
