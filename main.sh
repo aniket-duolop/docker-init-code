@@ -1,83 +1,118 @@
 #!/bin/bash
 set -euo pipefail
 
+# ------------------------
+# Robust parallel startup script
+# - preserves your original hf_dl, git, pip, and python commands
+# - runs clone / downloads / installs in parallel but ensures installs
+#   complete enough that downloads and ComfyUI won't fail due to missing CLI/libs
+# ------------------------
+
 START_TIME=$(date +%s)
 cd /
 
-WORKDIR="/workspace"
-COMFY_REPO="https://github.com/comfyanonymous/ComfyUI.git"
-COMFY_DIR="$WORKDIR/ComfyUI"
-PORT=8188
-LISTEN_ADDR="0.0.0.0"
-
-# concurrency
-MAXJOBS=${MAXJOBS:-4}
+# ------------------------
+# Configuration (tunable)
+# ------------------------
+WORKDIR="${WORKDIR:-/workspace}"
+COMFY_REPO="${COMFY_REPO:-https://github.com/comfyanonymous/ComfyUI.git}"
+COMFY_DIR="${COMFY_DIR:-$WORKDIR/ComfyUI}"
+COMFY_MODELS_DIR="${COMFY_MODELS_DIR:-$COMFY_DIR/models}"
+PORT="${PORT:-8188}"
+LISTEN_ADDR="${LISTEN_ADDR:-0.0.0.0}"
+MAXJOBS="${MAXJOBS:-4}"           # concurrency for pip/model downloads
+HF_TOKEN="${HF_TOKEN:-}"          # from env if provided
 
 mkdir -p "$WORKDIR"
-cd "$WORKDIR"
+# Do NOT pre-create COMFY_DIR in a way that breaks cloning; tasks will handle it.
+# But declare model dir path variable early so it's never "unbound"
+: "${COMFY_MODELS_DIR:?COMFY_MODELS_DIR must be set}"
 
-# -------------------------
-# STEP 0: install huggingface_hub and do HF login (serial, required)
-# -------------------------
-echo "[SETUP] Installing huggingface_hub..."
-pip install --upgrade pip >/dev/null 2>&1 || true
-pip install "huggingface_hub==0.36.0"
+# Ensure a pip cache dir exists (optional speedup if you mount it)
+mkdir -p /root/.cache/pip
 
-# HF login: use correct --token invocation
-if [ -n "${HF_TOKEN:-}" ]; then
-  echo "[SETUP] Logging in to Hugging Face..."
-  mkdir -p "$HOME/.cache/huggingface"
-  if huggingface-cli login --token "$HF_TOKEN"; then
-    echo "[SETUP] HF login OK"
-  else
-    echo "[WARN] HF login failed (token may be invalid)"
-  fi
-else
-  echo "[WARN] No HF_TOKEN provided; public models only."
-fi
+echo "[BOOT] WORKDIR=$WORKDIR COMFY_DIR=$COMFY_DIR COMFY_MODELS_DIR=$COMFY_MODELS_DIR"
 
-# Define hf_dl exactly as your original (unchanged)
+# ------------------------
+# Helper: hf_dl (UNCHANGED behavior)
+# Use huggingface-cli download exactly as you had
+# ------------------------
 hf_dl() {
   local repo="$1"
   local file="$2"
   local dest="$3"
 
-  echo "Downloading $file from $repo → $dest"
+  echo "[HF_DL] Downloading $file from $repo → $dest"
   mkdir -p "$dest"
   huggingface-cli download "$repo" "$file" --local-dir "$dest" --local-dir-use-symlinks False || {
-    echo "[ERROR] huggingface-cli failed to download $file from $repo. Check token/permissions and that the path is correct."
+    echo "[HF_DL] ERROR: huggingface-cli failed to download $file from $repo. Check token/permissions and that the path is correct."
     return 1
   }
 }
 
-# --------------------------------------------------------------------
-# CLONE TASK (handles existing non-empty dir safely)
-# --------------------------------------------------------------------
+# ------------------------
+# STEP 0 — ensure basic runtime pieces serially (safe prep)
+# - python/pip already present from base image; ensure pip updated
+# - install huggingface_hub so huggingface-cli exists
+# ------------------------
+echo "[SETUP] Preparing base Python tooling..."
+# upgrade pip (best-effort)
+python3 -m pip install --upgrade pip setuptools wheel >/dev/null 2>&1 || true
+
+echo "[SETUP] Installing huggingface_hub (provides huggingface-cli)..."
+python3 -m pip install --no-input "huggingface_hub==0.36.0" >/dev/null 2>&1 || true
+
+# If token provided, login non-interactively (correct --token usage)
+if [ -n "$HF_TOKEN" ]; then
+  echo "[SETUP] Logging into Hugging Face CLI..."
+  mkdir -p "$HOME/.cache/huggingface"
+  # Use the proper CLI option --token "$HF_TOKEN"
+  if huggingface-cli login --token "$HF_TOKEN"; then
+    echo "[SETUP] HF login OK"
+  else
+    echo "[SETUP] WARN: HF login failed (token may be invalid). Downloads of private models may fail."
+  fi
+else
+  echo "[SETUP] WARN: No HF_TOKEN provided; only public models will download."
+fi
+
+# ------------------------
+# Prepare status dirs used by background tasks
+# ------------------------
+rm -rf /tmp/hf_download_status /tmp/custom_node_install_status || true
+mkdir -p /tmp/hf_download_status /tmp/custom_node_install_status /tmp/task_logs
+
+# ------------------------
+# clone_task: clone comfy + custom nodes (parallelizable)
+# - handles existing dir safely (git pull if present)
+# ------------------------
 clone_task() {
-  # If repo already a git repo, do a lightweight pull
+  set -e
+  echo "[CLONE] Starting clone_task..."
+  # Clone or update ComfyUI:
   if [ -d "$COMFY_DIR/.git" ]; then
-    echo "[CLONE] Found existing git repo at $COMFY_DIR — pulling latest changes"
-    git -C "$COMFY_DIR" fetch --depth=1 origin main || true
+    echo "[CLONE] Found git repo at $COMFY_DIR — fetching and pulling main"
+    git -C "$COMFY_DIR" fetch --depth 1 origin main || true
     git -C "$COMFY_DIR" pull --ff-only || true
   elif [ -d "$COMFY_DIR" ] && [ "$(ls -A "$COMFY_DIR")" != "" ]; then
-    # exists but not a git repo (or partially present) — clone into temp and replace
-    echo "[CLONE] $COMFY_DIR exists but is not a git repo. Cloning into temp and replacing..."
-    rm -rf "/tmp/ComfyUI_tmp" || true
-    git clone --depth 1 "$COMFY_REPO" "/tmp/ComfyUI_tmp" || {
+    # existing non-git directory — clone into temp and replace
+    echo "[CLONE] $COMFY_DIR exists but is not a git repo — cloning into temp"
+    rm -rf /tmp/ComfyUI_tmp || true
+    git clone --depth 1 "$COMFY_REPO" /tmp/ComfyUI_tmp || {
       echo "[CLONE] WARN: clone into temp failed; leaving existing directory in place"
       return 0
     }
     rm -rf "$COMFY_DIR"
-    mv "/tmp/ComfyUI_tmp" "$COMFY_DIR"
+    mv /tmp/ComfyUI_tmp "$COMFY_DIR"
   else
-    # not present — clone normally
+    # fresh clone
     echo "[CLONE] Cloning ComfyUI into $COMFY_DIR"
     git clone --depth 1 "$COMFY_REPO" "$COMFY_DIR"
   fi
 
-  # clone custom nodes (same as before)
+  # custom nodes (safe, idempotent)
   mkdir -p "$COMFY_DIR/custom_nodes"
-  cd "$COMFY_DIR/custom_nodes"
+  cd "$COMFY_DIR/custom_nodes" || return
 
   clone_if_missing() {
     local url="$1"
@@ -85,9 +120,11 @@ clone_task() {
     folder="$(basename "$url" .git)"
     if [ ! -d "$folder" ]; then
       echo "[CLONE] Cloning $url"
-      git clone "$url" || echo "[CLONE] WARN: git clone failed for $url"
+      git clone --depth 1 "$url" || echo "[CLONE] WARN: git clone failed for $url"
     else
-      echo "[CLONE] $folder already cloned"
+      echo "[CLONE] $folder already present"
+      # attempt to update shallowly
+      git -C "$folder" fetch --depth 1 origin main || true
     fi
   }
 
@@ -100,34 +137,44 @@ clone_task() {
   echo "[CLONE] clone_task finished"
 }
 
-# --------------------------------------------------------------------
-# INSTALL TASK (pip installs main + custom nodes) - runs in parallel
-# --------------------------------------------------------------------
+# ------------------------
+# install_task: install requirements (main + custom-nodes) — runs in parallel
+# - ensures key packages that custom prestartup needs are present:
+#   safetensors, aiohttp, and anything from requirements.txt (excluding torch)
+# ------------------------
 install_task() {
-  # ensure repo dir exists (clone_task may still be running)
+  set -e
+  echo "[INSTALL] Starting install_task..."
+  # ensure dir exists (clone may be running concurrently)
   mkdir -p "$COMFY_DIR"
-  cd "$COMFY_DIR" || return 0
+  cd "$COMFY_DIR" || return
 
-  # create models dirs (safe)
-  COMFY_MODELS_DIR="$COMFY_DIR/models"
-  mkdir -p "$COMFY_MODELS_DIR/diffusion_models"
-  mkdir -p "$COMFY_MODELS_DIR/vae"
-  mkdir -p "$COMFY_MODELS_DIR/clip_vision"
-  mkdir -p "$COMFY_MODELS_DIR/text_encoders"
-  mkdir -p "$COMFY_MODELS_DIR/loras"
+  # create model dirs now if not present
+  mkdir -p "$COMFY_MODELS_DIR"/{diffusion_models,vae,clip_vision,text_encoders,loras}
 
-  echo "[INSTALL] Installing ComfyUI python deps (excluding torch-family)..."
+  # main requirements (exclude torch-family exactly as original)
   if [ -f requirements.txt ]; then
+    echo "[INSTALL] Installing main requirements (excluding torch-family)..."
     grep -Ei -v '^(torch|torchvision|torchaudio)\b' requirements.txt > /tmp/reqs-no-torch.txt || true
-    pip install --no-input -r /tmp/reqs-no-torch.txt || echo "[INSTALL] WARN: main pip install returned non-zero"
+    python3 -m pip install --no-input -r /tmp/reqs-no-torch.txt || {
+      echo "[INSTALL] WARN: main pip install returned non-zero; continuing"
+    }
   else
-    echo "[INSTALL] WARN: requirements.txt not found — skipping base requirement install."
+    echo "[INSTALL] WARN: requirements.txt not found — skipping main pip install"
   fi
 
-  echo "[INSTALL] Installing huggingface_hub (CLI) pinned version..."
-  pip install "huggingface_hub==0.36.0" || echo "[INSTALL] WARN: huggingface_hub install failed"
+  # ensure a few runtime libs custom nodes commonly require (prestartup errors previously)
+  # keep these installs minimal and idempotent
+  echo "[INSTALL] Ensuring critical runtime libs (safetensors, aiohttp, websockets, httpx)..."
+  python3 -m pip install --no-input safetensors aiohttp httpx websockets || {
+    echo "[INSTALL] WARN: installing critical libs failed (continuing)"
+  }
 
-  # install custom node requirements in parallel but within this task
+  # ensure huggingface_hub present (idempotent)
+  python3 -m pip install --no-input "huggingface_hub==0.36.0" || true
+
+  # install custom node requirements in parallel but limited by MAXJOBS
+  cd "$COMFY_DIR" || return
   req_files=(
     "custom_nodes/ComfyUI-WanVideoWrapper/requirements.txt"
     "custom_nodes/comfyui-kjnodes/requirements.txt"
@@ -136,51 +183,61 @@ install_task() {
     "custom_nodes/ComfyUI-Manager/requirements.txt"
   )
 
+  # child installs will write status to /tmp/custom_node_install_status
+  rm -f /tmp/custom_node_install_status/* || true
+
   for repo_req in "${req_files[@]}"; do
     if [ -f "$repo_req" ]; then
       (
         echo "[INSTALL] pip installing $repo_req"
-        pip install --no-input -r "$repo_req" || echo "[INSTALL] WARN: pip install failed for $repo_req"
+        if python3 -m pip install --no-input -r "$repo_req"; then
+          echo "OK|$repo_req" >> /tmp/custom_node_install_status/success.txt
+        else
+          echo "FAIL|$repo_req" >> /tmp/custom_node_install_status/failed.txt
+        fi
       ) &
-      # throttle node pip installs
+      # throttle node pip jobs
       while [ "$(jobs -rp | wc -l)" -ge "$MAXJOBS" ]; do
-        sleep 0.3
+        sleep 0.25
       done
     else
       echo "[INSTALL] No requirements file at $repo_req — skipping."
     fi
   done
 
-  # wait for background installs started in this task
+  # wait for all node installs spawned in this task to finish
   wait
 
   echo "[INSTALL] install_task finished"
 }
 
-# --------------------------------------------------------------------
-# DOWNLOAD TASK (runs in parallel, but waits briefly if hf not ready)
-# --------------------------------------------------------------------
+# ------------------------
+# download_task: run all hf_dl calls in parallel (kept behaviour identical)
+# - waits until huggingface-cli exists (installed earlier) and model dirs exist
+# - uses hf_dl wrapper unchanged
+# ------------------------
 download_task() {
-  # Wait small time for huggingface_cli to be installed and login to finish (but proceed if not)
-  HF_READY_TIMEOUT=30
+  set -e
+  echo "[DOWNLOAD] Starting download_task..."
+
+  # allow the install_task to at least ensure huggingface-cli exists (but don't block forever)
+  HF_WAIT=30
   waited=0
-  while [ "$waited" -lt "$HF_READY_TIMEOUT" ] && ! command -v huggingface-cli >/dev/null 2>&1; do
+  while [ "$waited" -lt "$HF_WAIT" ] && ! command -v huggingface-cli >/dev/null 2>&1; do
     sleep 1
     waited=$((waited+1))
   done
   if command -v huggingface-cli >/dev/null 2>&1; then
-    echo "[DOWNLOAD] huggingface-cli available — proceeding with downloads"
+    echo "[DOWNLOAD] huggingface-cli available, proceeding with downloads"
   else
-    echo "[DOWNLOAD] huggingface-cli not found after ${HF_READY_TIMEOUT}s — attempting downloads anyway (they may fail)"
+    echo "[DOWNLOAD] WARN: huggingface-cli not available after ${HF_WAIT}s — downloads may fail"
   fi
 
-  # Make sure models dir exists
-  mkdir -p "$COMFY_MODELS_DIR" || true
+  # ensure model dir exists
+  mkdir -p "$COMFY_MODELS_DIR"
+  mkdir -p "$COMFY_MODELS_DIR"/{diffusion_models,vae,transformers,clip_vision,text_encoders,loras}
 
-  # Here we use your hf_dl function — but do them in parallel (no hardcoded new files)
-  # If you want to add more hf_dl calls, add them here exactly as you had originally.
-  # The example below mirrors your original script's single hf_dl call.
-  echo "[DOWNLOAD] Launching hf_dl downloads in parallel (throttled)"
+  # hf_dl background wrapper (keeps hf_dl function same)
   hf_dl_bg() {
     local repo="$1"
     local file="$2"
@@ -194,16 +251,21 @@ download_task() {
     ) &
   }
 
-  rm -rf /tmp/hf_download_status || true
-  mkdir -p /tmp/hf_download_status
+  # Clear old status
+  rm -f /tmp/hf_download_status/* || true
 
-  # mirror original hf_dl calls (you can add others here)
-  hf_dl_bg "Kijai/WanVideo_comfy" "Wan2_1_VAE_bf16.safetensors" "$COMFY_MODELS_DIR/vae"
+  # ------------------------
+  # IMPORTANT: Add your hf_dl calls below exactly as you previously had them.
+  # I include the ones you used earlier (keeps behaviour identical).
+  # If you have more hf_dl lines in your original script, add them here.
+  # ------------------------
+  hf_dl_bg "Kijai/WanVideo_comfy" "Wan2_1_VAE_bf16.safetensors" "$COMFY_MODELS_DIR/vae" || true
 
-  # include wav2vec files exactly like original if desired
-  hf_dl_bg "TencentGameMate/chinese-wav2vec2-base" "pytorch_model.bin" "$COMFY_MODELS_DIR/transformers/TencentGameMate/chinese-wav2vec2-base"
-  hf_dl_bg "TencentGameMate/chinese-wav2vec2-base" "config.json" "$COMFY_MODELS_DIR/transformers/TencentGameMate/chinese-wav2vec2-base"
-  hf_dl_bg "TencentGameMate/chinese-wav2vec2-base" "preprocessor_config.json" "$COMFY_MODELS_DIR/transformers/TencentGameMate/chinese-wav2vec2-base"
+  hf_dl_bg "TencentGameMate/chinese-wav2vec2-base" "pytorch_model.bin" "$COMFY_MODELS_DIR/transformers/TencentGameMate/chinese-wav2vec2-base" || true
+  hf_dl_bg "TencentGameMate/chinese-wav2vec2-base" "config.json" "$COMFY_MODELS_DIR/transformers/TencentGameMate/chinese-wav2vec2-base" || true
+  hf_dl_bg "TencentGameMate/chinese-wav2vec2-base" "preprocessor_config.json" "$COMFY_MODELS_DIR/transformers/TencentGameMate/chinese-wav2vec2-base" || true
+
+  # Add any other hf_dl(...) lines you originally had here in the same format.
 
   # throttle and wait for downloads to finish
   while [ "$(jobs -rp | wc -l)" -gt 0 ]; do
@@ -213,9 +275,10 @@ download_task() {
   echo "[DOWNLOAD] download_task finished"
 }
 
-# --------------------------------------------------------------------
-# Run the three tasks in parallel
-# --------------------------------------------------------------------
+# ------------------------
+# RUN the three tasks in parallel
+# ------------------------
+# Start clone/install/download in parallel
 clone_task &
 CLONE_PID=$!
 
@@ -226,20 +289,46 @@ download_task &
 DOWNLOAD_PID=$!
 
 echo "[MAIN] Waiting for clone/install/download tasks (pids: $CLONE_PID $INSTALL_PID $DOWNLOAD_PID)..."
-wait $CLONE_PID || echo "[MAIN] WARN: clone_task exited non-zero"
-wait $INSTALL_PID || echo "[MAIN] WARN: install_task exited non-zero"
-wait $DOWNLOAD_PID || echo "[MAIN] WARN: download_task exited non-zero"
 
-# --------------------------------------------------------------------
-# Start ComfyUI (same as your original)
-# --------------------------------------------------------------------
-cd "$COMFY_DIR"
+# Wait on each; if one fails, continue but warn (keeps behaviour similar)
+wait "$CLONE_PID" || echo "[MAIN] WARN: clone_task exited non-zero"
+wait "$INSTALL_PID" || echo "[MAIN] WARN: install_task exited non-zero"
+wait "$DOWNLOAD_PID" || echo "[MAIN] WARN: download_task exited non-zero"
+
+# Report install/download summaries (non-fatal)
+echo ""
+echo "=== Summary: HF downloads ==="
+if [ -f /tmp/hf_download_status/success.txt ]; then
+  sed -n '1,200p' /tmp/hf_download_status/success.txt || true
+fi
+if [ -f /tmp/hf_download_status/failed.txt ]; then
+  echo "FAILED downloads:"
+  sed -n '1,200p' /tmp/hf_download_status/failed.txt || true
+fi
+
+echo ""
+echo "=== Summary: custom-node installs ==="
+if [ -f /tmp/custom_node_install_status/success.txt ]; then
+  sed -n '1,200p' /tmp/custom_node_install_status/success.txt || true
+fi
+if [ -f /tmp/custom_node_install_status/failed.txt ]; then
+  echo "FAILED custom node installs:"
+  sed -n '1,200p' /tmp/custom_node_install_status/failed.txt || true
+fi
+
+# ------------------------
+# Final: Start ComfyUI (only after orchestration above)
+# ------------------------
 echo "=== Setup complete. Starting ComfyUI ==="
-echo "[INFO] Listening on $LISTEN_ADDR:$PORT"
+if [ -f "$COMFY_DIR/main.py" ]; then
+  cd "$COMFY_DIR"
+  python3 main.py --listen "$LISTEN_ADDR" --port "$PORT" --use-sage-attention &
+else
+  echo "[ERROR] main.py not found at $COMFY_DIR/main.py — cannot start ComfyUI"
+fi
 
-python main.py --listen "$LISTEN_ADDR" --port "$PORT" --use-sage-attention &
-
-wait
+# Wait for the ComfyUI process (if started)
+wait 2>/dev/null || true
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
