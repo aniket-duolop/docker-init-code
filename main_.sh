@@ -49,7 +49,7 @@ fi
 # ------------------------
 echo "[INFO] Installing huggingface_hub (CLI) pinned version..."
 # $PIP install "huggingface_hub==0.36.0"
-pip install "huggingface_hub==0.36.0 hf_transfer"
+pip install "huggingface_hub==0.36.0"
 
 # If token provided via env, log in non-interactively
 if [ -n "$HF_TOKEN" ]; then

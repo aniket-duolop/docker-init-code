@@ -16,7 +16,7 @@ cd "$WORKDIR"
 # ------------------------
 # Helpers & Globals
 # ------------------------
-log() { echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"; }
+log() { echo "[INFO][$(date +'%Y-%m-%d %H:%M:%S')] $*"; }
 
 # hf_dl uses huggingface-cli; ensure huggingface_hub is installed prior to starting downloads
 hf_dl() {
@@ -96,7 +96,7 @@ clone_custom_nodes() {
 # ------------------------
 install_huggingface_cli() {
   log "Installing huggingface_hub (CLI) pinned version..."
-  pip install "huggingface_hub==0.36.0"
+  pip install "huggingface_hub==0.36.0 hf_transfer"
   log "huggingface_hub installed."
 }
 
