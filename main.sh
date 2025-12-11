@@ -96,7 +96,8 @@ clone_custom_nodes() {
 # ------------------------
 install_huggingface_cli() {
   log "Installing huggingface_hub (CLI) pinned version..."
-  pip install "huggingface_hub==0.36.0 hf_transfer"
+  pip install "huggingface_hub==0.36.0"
+  pip install "hf_transfer"
   log "huggingface_hub installed."
 }
 
