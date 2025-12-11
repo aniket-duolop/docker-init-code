@@ -96,9 +96,9 @@ clone_custom_nodes() {
 # ------------------------
 install_huggingface_cli() {
   log "Installing huggingface_hub (CLI) pinned version..."
-  pip install "huggingface_hub==0.36.0"
-  pip install "hf_transfer"
-  log "huggingface_hub installed."
+  pip install --no-input "huggingface_hub==0.36.0"
+  pip install --no-input "hf_transfer"
+  log "huggingface_hub and hf_transfer installed."
 }
 
 # ---------------
@@ -186,7 +186,7 @@ fi
 # Safety: ensure we are in COMFY_DIR
 cd "$COMFY_DIR"
 
-# Trap to kill background jobs on exit
+# Trap to kill background jobs on unexpected exit
 bg_pids=()
 cleanup() {
   for pid in "${bg_pids[@]:-}"; do
@@ -215,21 +215,20 @@ for pid in "${bg_pids[@]}"; do
 done
 
 # ------------------------
-# Final info + start ComfyUI
+# Setup finished -> compute and print setup elapsed NOW
 # ------------------------
-log "=== Setup complete. Starting ComfyUI ==="
-log "Listening on $LISTEN_ADDR:$PORT"
-
-# Start ComfyUI (same flags you used)
-python main.py --listen "$LISTEN_ADDR" --port "$PORT" --use-sage-attention &
-
-# Wait for the server process (so we can print elapsed time after termination)
-wait
-
-END_TIME=$(date +%s)
-ELAPSED=$(( END_TIME - START_TIME ))
+SETUP_END_TIME=$(date +%s)
+SETUP_ELAPSED=$(( SETUP_END_TIME - START_TIME ))
 
 echo ""
 echo "======================================"
-echo "🚀 Total setup time: ${ELAPSED} seconds"
+echo "✅ Setup complete. Setup time: ${SETUP_ELAPSED} seconds"
 echo "======================================"
+echo ""
+
+log "Starting ComfyUI and replacing this shell with the process (exec)..."
+log "Listening on $LISTEN_ADDR:$PORT"
+
+# Replace current shell with the python process so it becomes PID 1 (keeps container alive)
+exec python main.py --listen "$LISTEN_ADDR" --port "$PORT" --use-sage-attention
+# <<< we never reach this point because exec replaced the shell with python
