@@ -1,2 +1,1 @@
-# docker-init-code
-# docker-init-code
+Entry shell file for runpod docker container
