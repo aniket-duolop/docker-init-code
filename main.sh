@@ -149,16 +149,16 @@ download_models() {
   hf_dl "Kijai/WanVideo_comfy" "Wan2_1_VAE_bf16.safetensors" "$COMFY_MODELS_DIR/vae" || true
 
   # Add additional hf_dl calls as needed (commented out entries kept for your convenience)
-  # hf_dl "Kijai/WanVideo_comfy_GGUF" "InfiniteTalk/Wan2_1-InfiniteTalk_Single_Q8.gguf" "$COMFY_MODELS_DIR/diffusion_models" || true
-  # hf_dl "Kijai/WanVideo_comfy_GGUF" "InfiniteTalk/Wan2_1-InfiniteTalk_Multi_Q8.gguf" "$COMFY_MODELS_DIR/diffusion_models" || true
-  # hf_dl "city96/Wan2.1-I2V-14B-480P-gguf" "wan2.1-i2v-14b-480p-Q8_0.gguf" "$COMFY_MODELS_DIR/diffusion_models" || true
-  # hf_dl "Kijai/MelBandRoFormer_comfy" "MelBandRoformer_fp16.safetensors" "$COMFY_MODELS_DIR/diffusion_models" || true
+  hf_dl "Kijai/WanVideo_comfy_GGUF" "InfiniteTalk/Wan2_1-InfiniteTalk_Single_Q8.gguf" "$COMFY_MODELS_DIR/diffusion_models" || true
+  hf_dl "Kijai/WanVideo_comfy_GGUF" "InfiniteTalk/Wan2_1-InfiniteTalk_Multi_Q8.gguf" "$COMFY_MODELS_DIR/diffusion_models" || true
+  hf_dl "city96/Wan2.1-I2V-14B-480P-gguf" "wan2.1-i2v-14b-480p-Q8_0.gguf" "$COMFY_MODELS_DIR/diffusion_models" || true
+  hf_dl "Kijai/MelBandRoFormer_comfy" "MelBandRoformer_fp16.safetensors" "$COMFY_MODELS_DIR/diffusion_models" || true
 
   # Transformers example (if needed)
-  # W2V_DIR="$COMFY_MODELS_DIR/transformers/TencentGameMate/chinese-wav2vec2-base"
-  # hf_dl "TencentGameMate/chinese-wav2vec2-base" "pytorch_model.bin" "$W2V_DIR" || true
-  # hf_dl "TencentGameMate/chinese-wav2vec2-base" "config.json" "$W2V_DIR" || true
-  # hf_dl "TencentGameMate/chinese-wav2vec2-base" "preprocessor_config.json" "$W2V_DIR" || true
+  W2V_DIR="$COMFY_MODELS_DIR/transformers/TencentGameMate/chinese-wav2vec2-base"
+  hf_dl "TencentGameMate/chinese-wav2vec2-base" "pytorch_model.bin" "$W2V_DIR" || true
+  hf_dl "TencentGameMate/chinese-wav2vec2-base" "config.json" "$W2V_DIR" || true
+  hf_dl "TencentGameMate/chinese-wav2vec2-base" "preprocessor_config.json" "$W2V_DIR" || true
 
   log "Model download section finished (some downloads may have failed — check the log above)."
 }
